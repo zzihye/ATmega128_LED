@@ -1,0 +1,215 @@
+#define F_CPU 7372800
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <util/delay.h>
+#include <math.h>
+
+volatile int STEP[2][8]=
+{
+	{0x08,0x04,0x02,0x01,0x08,0x04,0x02,0x01}, //1상 여자방식 정방향
+	{0x01,0x02,0x04,0x08,0x01,0x02,0x04,0x08} //1상 여자방식 역방향
+} ;
+
+volatile unsigned int flag=0, distance=0, count=0;
+volatile unsigned char duty;
+unsigned char pattern_num[10]={0x3f,0x06,0x5b,0x4f,0x66,0x6d,0x7d,0x27,0x7f,0x6f};				//0~9출력 배열
+
+void Serialinit(unsigned long baud)			//분주비 계산 함수
+{
+	unsigned short ubrr;
+	ubrr = (unsigned short) (F_CPU/(16*baud)-1);
+	UBRR0H = (unsigned char)(ubrr >> 8);
+	UBRR0L = (unsigned char)(ubrr & 0xff);
+	UCSR0B = 0x18; 							// RX TX 허용
+	UCSR0C = 0x06; 							// 비동기 모드 , 정지 비트 : 1bit , 문자 크기: 8bit , 패리티 불능
+}
+void trans_x (unsigned char data)
+{
+	while((UCSR0A & 0x20) == 0x00);			// 버퍼(UDR0)에 데이터가 있어서 전송준비가 될 때 까지 대기
+	UDR0 = data;							// 시리얼 포트를 통해 데이터 전송
+}
+
+void fnd_num(unsigned char data)
+{
+	for(int i=0;i<20;i++)						//FND 작동
+	{
+		PORTD=~0x20;							//PD4
+		PORTC=~pattern_num[(distance%100)/10];	//십의 자리
+		_delay_ms(1);
+		
+		PORTD=~0x10;							//PD5
+		PORTC=~pattern_num[distance%10];		//일의 자리
+		_delay_ms(1);
+	}
+}
+void Ultrasonic_setting()
+{
+	// 초음파 센서
+	TCCR3B=0x0a;	// CTC모드, 분주비8
+	ETIMSK=0x10;	// 타이머/카운터3 비교일치 인터럽트 허용
+	EICRB=0x03;		// 상승 모서리에서 인터럽트 요구
+	EIMSK=0x10;		// INT4 인터럽트 허용
+	OCR3A = 0;		// 비교일치 레지스터 초기화
+}
+
+ISR(TIMER3_COMPA_vect)	//타이머카운터3 비교일치모드
+{
+	if(count<10)
+	{
+		PORTE=0x08; 	//PORTE3 초음파 트리거
+		OCR3A=1;		//1us
+	}
+	else				// 10us가 되었을 때
+	{
+		PORTE=0x00;
+		OCR3A=55295;	//60ms  (측정 주기를 60ms 이상으로 할 것 datasheets 참조)
+		count=0;
+	}
+	count++;
+}
+
+ISR(INT4_vect)			//에코  PORTE4   (INT4)
+{
+	if(flag==0)
+	{
+		TCNT3=0; 		// TCNT값 초기화
+		EICRB=0x02; 	// 하강모서리가 인터럽트 요구
+		flag=1;
+	}
+	else
+	{
+		distance = TCNT3/58;	// 1uS/58 =1cm (데이터 시트 참조)
+		EICRB=0x03;				// 상승 모서리가 인터럽트 요구
+		flag=0;
+	}
+}
+
+void main(void)
+{
+	DDRA=0Xff;
+	DDRB=0x0f;					//PORTB0~3
+	DDRC=0XFF;
+	DDRE=0x08;					// PORTE3 (트리거) 입력, PORTE4 (에코) 출력
+	PORTA=~0xff;
+	
+	Ultrasonic_setting();
+	sei();						// 전역 인터럽트 허용
+	Serialinit(9600);			// 보레이트 9600 설정
+	
+	int i=0,LED;
+	
+	while(1)
+	{
+		while((~PIND&0X0F)==0x01)
+		{
+			if(5>distance)
+			{
+				LED=0x01;
+				PORTA=~0X01;
+			}
+			else if(10>distance)
+			{
+				LED=0x03;
+				PORTA=~0X03;
+			}
+			else if(15>distance)
+			{
+				LED=0x07;
+				PORTA=~LED;
+			}
+			else if(20>distance)
+			{
+				LED=0x0F;
+				PORTA=~LED;
+			}
+			else if(25>distance)
+			{
+				LED=0x1F;
+				PORTA=~LED;
+			}
+			else if(30>distance)
+			{
+				LED=0x3F;
+				PORTA=~LED;
+			}
+			else if(35>distance)
+			{
+				LED=0x7F;
+				PORTA=~LED;
+			}
+			else if(40>distance)
+			{
+				LED=0xFF;
+				PORTA=~LED;
+			}
+		}
+		if((~PIND&0X0F)==0x02)
+		{
+			fnd_num(distance);
+		}
+
+		else if((~PIND&0X0F)==0X04)
+		{
+			trans_x((distance%100)/10 +'0');
+			trans_x((distance%10) +'0');
+			trans_x(0x0D);              // 새 줄로 문자표시 하는 아스키코드
+			
+		}
+		else if((~PIND&0X0F)==0x08)
+		{
+			if(distance<10)
+			{
+				for(i=0;i<8;i++)
+				{
+					PORTB=STEP[1][i];
+					_delay_ms(3);
+				}
+			}
+			else if(distance>=10 && distance<15)
+			{
+				for(i=0;i<8;i++)
+				{
+					PORTB=STEP[1][i];
+					_delay_ms(7);
+				}
+			}
+			else if(distance>=15 && distance <20)
+			{
+				
+				for(i=0;i<8;i++)
+				{
+					PORTB=STEP[1][i];
+					_delay_ms(20);
+				}
+			}
+			else if(distance==20)
+			{
+				PORTB=0X00;
+			}
+			else if(distance>20 && distance<=25)
+			{
+				for(i=0;i<8;i++)
+				{
+					PORTB=STEP[0][i];
+					_delay_ms(20);
+				}
+			}
+			else if(distance>25 && distance<=30)
+			{
+				for(i=0;i<8;i++)
+				{
+					PORTB=STEP[0][i];
+					_delay_ms(7);
+				}
+			}
+			else if(distance>30)
+			{
+				for(i=0;i<8;i++)
+				{
+					PORTB=STEP[0][i];
+					_delay_ms(3);
+				}
+			}
+		}
+	}
+}
